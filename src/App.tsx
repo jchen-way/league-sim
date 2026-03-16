@@ -322,41 +322,48 @@ function App() {
 
             <div className="dashboard-content">
               <div className="grid-layout">
-                <div className="panel table-panel">
-                  <div className="panel-header">
-                    <h3>League Standings</h3>
-                    <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-                      <button
-                        className="btn-secondary"
-                        onClick={() => downloadFromUrl(`/api/export/seasons/${activeSeason.id}.csv`)}
-                        disabled={isBusy}
-                      >
-                        Season CSV
-                      </button>
+                <div className="left-column">
+                  <div className="panel table-panel">
+                    <div className="panel-header">
+                      <h3>League Standings</h3>
+                      <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+                        <button
+                          className="btn-secondary"
+                          onClick={() => downloadFromUrl(`/api/export/seasons/${activeSeason.id}.csv`)}
+                          disabled={isBusy}
+                        >
+                          Season CSV
+                        </button>
+                        <button
+                          className="btn-secondary"
+                          onClick={() => downloadFromUrl("/api/export/all-time.csv")}
+                          disabled={isBusy}
+                        >
+                          All-Time CSV
+                        </button>
+                      </div>
+                    </div>
+                    <StatsTable rows={activeSeasonStats} />
+                  </div>
+
+                  <div className="panel table-panel">
+                    <div className="panel-header">
+                      <h3>All-Time Standings</h3>
                       <button
                         className="btn-secondary"
                         onClick={() => downloadFromUrl("/api/export/all-time.csv")}
                         disabled={isBusy}
                       >
-                        All-Time CSV
+                        Export All-Time CSV
                       </button>
                     </div>
+                    <StatsTable rows={allTimeStats} />
                   </div>
-                  <StatsTable rows={activeSeasonStats} />
                 </div>
 
-                <div className="panel">
+                <div className="panel right-column-panel">
                   <div className="panel-header">
                     <h3>Match Results</h3>
-                    {nextRoundMatch ? (
-                      <button
-                        className="btn-secondary"
-                        onClick={() => downloadFromUrl(`/api/export/seasons/${activeSeason.id}/rounds/${nextRoundMatch.number}.csv`)}
-                        disabled={isBusy}
-                      >
-                        Next Round CSV
-                      </button>
-                    ) : null}
                   </div>
                   <div className="rounds-list" style={{ overflowY: "auto", flex: 1 }}>
                     {activeSeason.rounds.length === 0 && (
@@ -403,20 +410,6 @@ function App() {
                     })}
                   </div>
                 </div>
-              </div>
-
-              <div className="panel table-panel" style={{ marginTop: "1.5rem" }}>
-                <div className="panel-header">
-                  <h3>All-Time Standings</h3>
-                  <button
-                    className="btn-secondary"
-                    onClick={() => downloadFromUrl("/api/export/all-time.csv")}
-                    disabled={isBusy}
-                  >
-                    Export All-Time CSV
-                  </button>
-                </div>
-                <StatsTable rows={allTimeStats} />
               </div>
             </div>
           </>

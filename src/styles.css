@@ -384,6 +384,18 @@ input:focus {
   gap: 2rem;
   max-width: 1600px;
   margin: 0 auto;
+  align-items: start;
+}
+
+.left-column {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  min-width: 0;
+}
+
+.right-column-panel {
+  min-width: 0;
 }
 
 .panel {
@@ -396,6 +408,11 @@ input:focus {
   flex-direction: column;
   overflow: hidden;
   box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+}
+
+.table-panel {
+  align-self: start;
+  height: fit-content;
 }
 
 .panel-header {

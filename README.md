@@ -1,6 +1,6 @@
 # Game Simulator
 
-A Vite + React + TypeScript game simulator built from the local `.agents` requirements.
+A Vite + React + TypeScript game simulator
 
 ## Features
 
@@ -27,7 +27,3 @@ npm start
 ```
 
 The production server serves the built frontend from `dist/` and the API from the same Node process.
-
-## Deploy
-
-This repo includes [render.yaml](/Users/jiaweichen/Downloads/game-sim/render.yaml) for a Render web service with a persistent disk mounted at `data/` for the SQLite database.

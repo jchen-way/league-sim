@@ -4,6 +4,20 @@ export type Team = {
   createdAt: string;
 };
 
+export type MatchEventType = "goal" | "yellow_card" | "red_card" | "substitution";
+
+export type MatchEvent = {
+  id: string;
+  matchId: string;
+  teamId: string;
+  playerId: string;
+  minute: number;
+  stoppageMinute: number | null;
+  type: MatchEventType;
+  playerName: string;
+  secondaryPlayerName: string | null;
+};
+
 export type Match = {
   id: string;
   roundNumber: number;
@@ -17,6 +31,7 @@ export type Match = {
   awayPossessionSeconds: number | null;
   playedAt: string | null;
   winnerTeamId: string | null;
+  events: MatchEvent[];
 };
 
 export type Round = {
@@ -59,4 +74,15 @@ export type SeasonStatsRow = Stats & {
 export type AppState = {
   teams: Team[];
   seasons: Season[];
+};
+
+export type AuthUser = {
+  id: string;
+  name: string;
+  email: string;
+  createdAt: string;
+};
+
+export type AuthResponse = {
+  user: AuthUser;
 };

@@ -15,16 +15,6 @@ export function formatDateTime(value: string | null) {
   }).format(new Date(value));
 }
 
-export function downloadText(filename: string, content: string, mimeType: string) {
-  const blob = new Blob([content], { type: mimeType });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
 export function downloadFromUrl(url: string) {
   const anchor = document.createElement("a");
   anchor.href = url;

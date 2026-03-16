@@ -1,7 +1,8 @@
-import { AppState } from "../types";
+import { AppState, AuthResponse, AuthUser } from "../types";
 
 async function request<T>(input: string, init?: RequestInit): Promise<T> {
   const response = await fetch(input, {
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       ...(init?.headers ?? {}),
@@ -25,6 +26,30 @@ async function request<T>(input: string, init?: RequestInit): Promise<T> {
   }
 
   return (await response.json()) as T;
+}
+
+export function fetchCurrentUser() {
+  return request<{ user: AuthUser | null }>("/api/me");
+}
+
+export function signUp(name: string, email: string, password: string) {
+  return request<AuthResponse>("/api/auth/signup", {
+    method: "POST",
+    body: JSON.stringify({ name, email, password }),
+  });
+}
+
+export function logIn(email: string, password: string) {
+  return request<AuthResponse>("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+export function logOut() {
+  return request<{ ok: true }>("/api/auth/logout", {
+    method: "POST",
+  });
 }
 
 export function fetchState() {

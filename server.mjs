@@ -1,17 +1,22 @@
 import { createServer } from "node:http";
-import { createReadStream, existsSync, mkdirSync, statSync } from "node:fs";
+import { createReadStream, existsSync, statSync } from "node:fs";
 import { dirname, extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DatabaseSync } from "node:sqlite";
+import { Pool } from "pg";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const dataDir = join(__dirname, "data");
 const distDir = join(__dirname, "dist");
-mkdirSync(dataDir, { recursive: true });
 
-const db = new DatabaseSync(join(dataDir, "game-sim.sqlite"));
-db.exec("PRAGMA foreign_keys = ON;");
-initSchema();
+if (!process.env.DATABASE_URL) {
+  throw new Error("DATABASE_URL is required. Configure a Postgres connection before starting the server.");
+}
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : undefined,
+});
+
+await initSchema();
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -23,7 +28,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (method === "GET" && url.pathname === "/api/state") {
-      return sendJson(response, 200, loadState());
+      return sendJson(response, 200, await loadState());
     }
 
     if (method === "POST" && url.pathname === "/api/teams") {
@@ -33,8 +38,8 @@ const server = createServer(async (request, response) => {
         return sendJson(response, 400, { error: "Team name is required." });
       }
 
-      createTeam(name);
-      return sendJson(response, 201, loadState());
+      await createTeam(name);
+      return sendJson(response, 201, await loadState());
     }
 
     if (method === "PATCH" && /^\/api\/teams\/[^/]+$/.test(url.pathname)) {
@@ -45,14 +50,14 @@ const server = createServer(async (request, response) => {
         return sendJson(response, 400, { error: "Team name is required." });
       }
 
-      updateTeam(teamId, name);
-      return sendJson(response, 200, loadState());
+      await updateTeam(teamId, name);
+      return sendJson(response, 200, await loadState());
     }
 
     if (method === "DELETE" && /^\/api\/teams\/[^/]+$/.test(url.pathname)) {
       const teamId = decodeURIComponent(url.pathname.split("/").at(-1) ?? "");
-      deleteTeam(teamId);
-      return sendJson(response, 200, loadState());
+      await deleteTeam(teamId);
+      return sendJson(response, 200, await loadState());
     }
 
     if (method === "POST" && url.pathname === "/api/seasons") {
@@ -62,31 +67,31 @@ const server = createServer(async (request, response) => {
         return sendJson(response, 400, { error: "Season name is required." });
       }
 
-      createSeasonRecord(name);
-      return sendJson(response, 201, loadState());
+      await createSeasonRecord(name);
+      return sendJson(response, 201, await loadState());
     }
 
     if (method === "DELETE" && /^\/api\/seasons\/[^/]+$/.test(url.pathname)) {
       const seasonId = decodeURIComponent(url.pathname.split("/").at(-1) ?? "");
-      deleteSeason(seasonId);
-      return sendJson(response, 200, loadState());
+      await deleteSeason(seasonId);
+      return sendJson(response, 200, await loadState());
     }
 
     if (method === "POST" && /^\/api\/seasons\/[^/]+\/simulate-round$/.test(url.pathname)) {
       const seasonId = decodeURIComponent(url.pathname.split("/")[3] ?? "");
-      simulateRoundRecord(seasonId);
-      return sendJson(response, 200, loadState());
+      await simulateRoundRecord(seasonId);
+      return sendJson(response, 200, await loadState());
     }
 
     if (method === "POST" && /^\/api\/seasons\/[^/]+\/simulate-season$/.test(url.pathname)) {
       const seasonId = decodeURIComponent(url.pathname.split("/")[3] ?? "");
-      simulateSeasonRecord(seasonId);
-      return sendJson(response, 200, loadState());
+      await simulateSeasonRecord(seasonId);
+      return sendJson(response, 200, await loadState());
     }
 
     if (method === "GET" && /^\/api\/export\/seasons\/[^/]+\.csv$/.test(url.pathname)) {
       const seasonId = decodeURIComponent(url.pathname.split("/").at(-1) ?? "").replace(/\.csv$/, "");
-      const state = loadState();
+      const state = await loadState();
       const season = state.seasons.find((entry) => entry.id === seasonId);
       if (!season) {
         return sendJson(response, 404, { error: "Season not found." });
@@ -99,7 +104,7 @@ const server = createServer(async (request, response) => {
       const [, , , seasonIdToken, , roundToken] = url.pathname.split("/");
       const seasonId = decodeURIComponent(seasonIdToken);
       const roundNumber = Number(roundToken.replace(/\.csv$/, ""));
-      const state = loadState();
+      const state = await loadState();
       const season = state.seasons.find((entry) => entry.id === seasonId);
       if (!season) {
         return sendJson(response, 404, { error: "Season not found." });
@@ -109,17 +114,14 @@ const server = createServer(async (request, response) => {
     }
 
     if (method === "GET" && url.pathname === "/api/export/all-time.csv") {
-      const state = loadState();
-      const rows = [
-        statsHeaderRow(),
-        ...buildAllTimeStats(state.seasons, state.teams).map(statsRowToCsv),
-      ];
+      const state = await loadState();
+      const rows = [statsHeaderRow(), ...buildAllTimeStats(state.seasons, state.teams).map(statsRowToCsv)];
       return sendCsv(response, "all-time-stats.csv", rows);
     }
 
     if (method === "GET" && /^\/api\/export\/teams\/[^/]+\.csv$/.test(url.pathname)) {
       const teamId = decodeURIComponent(url.pathname.split("/").at(-1) ?? "").replace(/\.csv$/, "");
-      const state = loadState();
+      const state = await loadState();
       const team = state.teams.find((entry) => entry.id === teamId);
       if (!team) {
         return sendJson(response, 404, { error: "Team not found." });
@@ -144,117 +146,101 @@ server.listen(port, "0.0.0.0", () => {
   console.log(`Server listening on http://0.0.0.0:${port}`);
 });
 
-function initSchema() {
-  db.exec(`
+async function initSchema() {
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS teams (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL UNIQUE,
-      created_at TEXT NOT NULL
+      created_at TIMESTAMPTZ NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS seasons (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
-      created_at TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL,
       status TEXT NOT NULL CHECK (status IN ('active', 'completed'))
     );
 
     CREATE TABLE IF NOT EXISTS season_teams (
-      season_id TEXT NOT NULL,
-      team_id TEXT NOT NULL,
+      season_id TEXT NOT NULL REFERENCES seasons(id) ON DELETE CASCADE,
+      team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE RESTRICT,
       position INTEGER NOT NULL,
-      PRIMARY KEY (season_id, team_id),
-      FOREIGN KEY (season_id) REFERENCES seasons(id) ON DELETE CASCADE,
-      FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE RESTRICT
+      PRIMARY KEY (season_id, team_id)
     );
 
     CREATE TABLE IF NOT EXISTS rounds (
-      season_id TEXT NOT NULL,
+      season_id TEXT NOT NULL REFERENCES seasons(id) ON DELETE CASCADE,
       number INTEGER NOT NULL,
-      simulated_at TEXT,
-      PRIMARY KEY (season_id, number),
-      FOREIGN KEY (season_id) REFERENCES seasons(id) ON DELETE CASCADE
+      simulated_at TIMESTAMPTZ,
+      PRIMARY KEY (season_id, number)
     );
 
     CREATE TABLE IF NOT EXISTS matches (
       id TEXT PRIMARY KEY,
-      season_id TEXT NOT NULL,
+      season_id TEXT NOT NULL REFERENCES seasons(id) ON DELETE CASCADE,
       round_number INTEGER NOT NULL,
-      home_team_id TEXT NOT NULL,
-      away_team_id TEXT NOT NULL,
+      home_team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE RESTRICT,
+      away_team_id TEXT NOT NULL REFERENCES teams(id) ON DELETE RESTRICT,
       home_score INTEGER,
       away_score INTEGER,
       home_shots_on_target INTEGER,
       away_shots_on_target INTEGER,
       home_possession_seconds INTEGER,
       away_possession_seconds INTEGER,
-      played_at TEXT,
-      winner_team_id TEXT,
-      FOREIGN KEY (season_id) REFERENCES seasons(id) ON DELETE CASCADE,
-      FOREIGN KEY (home_team_id) REFERENCES teams(id) ON DELETE RESTRICT,
-      FOREIGN KEY (away_team_id) REFERENCES teams(id) ON DELETE RESTRICT,
-      FOREIGN KEY (winner_team_id) REFERENCES teams(id) ON DELETE RESTRICT
+      played_at TIMESTAMPTZ,
+      winner_team_id TEXT REFERENCES teams(id) ON DELETE RESTRICT
     );
   `);
-
-  addColumnIfMissing("matches", "home_shots_on_target", "INTEGER");
-  addColumnIfMissing("matches", "away_shots_on_target", "INTEGER");
-  addColumnIfMissing("matches", "home_possession_seconds", "INTEGER");
-  addColumnIfMissing("matches", "away_possession_seconds", "INTEGER");
 }
 
-function addColumnIfMissing(tableName, columnName, definition) {
-  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
-  if (!columns.some((column) => column.name === columnName)) {
-    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
-  }
+async function loadState() {
+  return {
+    teams: await loadTeams(),
+    seasons: await loadSeasons(),
+  };
 }
 
-function loadState() {
-  return { teams: loadTeams(), seasons: loadSeasons() };
+async function loadTeams() {
+  const result = await pool.query(
+    "SELECT id, name, created_at FROM teams ORDER BY created_at ASC, name ASC",
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    createdAt: new Date(row.created_at).toISOString(),
+  }));
 }
 
-function loadTeams() {
-  return db
-    .prepare("SELECT id, name, created_at FROM teams ORDER BY datetime(created_at) ASC, name ASC")
-    .all()
-    .map((row) => ({
-      id: row.id,
-      name: row.name,
-      createdAt: row.created_at,
-    }));
-}
+async function loadSeasons() {
+  const [seasonsRes, seasonTeamsRes, roundsRes, matchesRes] = await Promise.all([
+    pool.query("SELECT id, name, created_at, status FROM seasons ORDER BY created_at DESC, name ASC"),
+    pool.query("SELECT season_id, team_id, position FROM season_teams ORDER BY season_id, position ASC"),
+    pool.query("SELECT season_id, number, simulated_at FROM rounds ORDER BY season_id, number ASC"),
+    pool.query(`
+      SELECT id, season_id, round_number, home_team_id, away_team_id, home_score, away_score,
+             home_shots_on_target, away_shots_on_target, home_possession_seconds, away_possession_seconds,
+             played_at, winner_team_id
+      FROM matches
+      ORDER BY season_id, round_number ASC, id ASC
+    `),
+  ]);
 
-function loadSeasons() {
-  const seasons = db
-    .prepare("SELECT id, name, created_at, status FROM seasons ORDER BY datetime(created_at) DESC, name ASC")
-    .all();
-  const seasonTeams = db.prepare("SELECT season_id, team_id, position FROM season_teams ORDER BY season_id, position ASC").all();
-  const rounds = db.prepare("SELECT season_id, number, simulated_at FROM rounds ORDER BY season_id, number ASC").all();
-  const matches = db.prepare(`
-    SELECT id, season_id, round_number, home_team_id, away_team_id, home_score, away_score,
-           home_shots_on_target, away_shots_on_target, home_possession_seconds, away_possession_seconds,
-           played_at, winner_team_id
-    FROM matches
-    ORDER BY season_id, round_number ASC, id ASC
-  `).all();
-
-  return seasons.map((season) => ({
+  return seasonsRes.rows.map((season) => ({
     id: season.id,
     name: season.name,
-    createdAt: season.created_at,
+    createdAt: new Date(season.created_at).toISOString(),
     status: season.status,
-    teamIds: seasonTeams.filter((row) => row.season_id === season.id).map((row) => row.team_id),
-    rounds: rounds
+    teamIds: seasonTeamsRes.rows.filter((row) => row.season_id === season.id).map((row) => row.team_id),
+    rounds: roundsRes.rows
       .filter((row) => row.season_id === season.id)
       .map((row) => ({
         number: row.number,
-        simulatedAt: row.simulated_at,
-        matchIds: matches
+        simulatedAt: row.simulated_at ? new Date(row.simulated_at).toISOString() : null,
+        matchIds: matchesRes.rows
           .filter((match) => match.season_id === season.id && match.round_number === row.number)
           .map((match) => match.id),
       })),
-    matches: matches
+    matches: matchesRes.rows
       .filter((row) => row.season_id === season.id)
       .map((row) => ({
         id: row.id,
@@ -267,100 +253,119 @@ function loadSeasons() {
         awayShotsOnTarget: row.away_shots_on_target,
         homePossessionSeconds: row.home_possession_seconds,
         awayPossessionSeconds: row.away_possession_seconds,
-        playedAt: row.played_at,
+        playedAt: row.played_at ? new Date(row.played_at).toISOString() : null,
         winnerTeamId: row.winner_team_id,
       })),
   }));
 }
 
-function createTeam(name) {
-  db.prepare("INSERT INTO teams (id, name, created_at) VALUES (?, ?, ?)").run(createId("team"), name, new Date().toISOString());
+async function createTeam(name) {
+  await pool.query(
+    "INSERT INTO teams (id, name, created_at) VALUES ($1, $2, $3)",
+    [createId("team"), name, new Date().toISOString()],
+  );
 }
 
-function updateTeam(teamId, name) {
-  const result = db.prepare("UPDATE teams SET name = ? WHERE id = ?").run(name, teamId);
-  if (result.changes === 0) {
+async function updateTeam(teamId, name) {
+  const result = await pool.query("UPDATE teams SET name = $1 WHERE id = $2", [name, teamId]);
+  if (result.rowCount === 0) {
     throw new Error("Team not found.");
   }
 }
 
-function deleteTeam(teamId) {
-  const usage = db.prepare("SELECT 1 FROM season_teams WHERE team_id = ? LIMIT 1").get(teamId);
-  if (usage) {
+async function deleteTeam(teamId) {
+  const usage = await pool.query("SELECT 1 FROM season_teams WHERE team_id = $1 LIMIT 1", [teamId]);
+  if (usage.rowCount) {
     throw new Error("This team is already used in a season and cannot be removed.");
   }
 
-  const result = db.prepare("DELETE FROM teams WHERE id = ?").run(teamId);
-  if (result.changes === 0) {
+  const result = await pool.query("DELETE FROM teams WHERE id = $1", [teamId]);
+  if (result.rowCount === 0) {
     throw new Error("Team not found.");
   }
 }
 
-function createSeasonRecord(name) {
-  const teams = loadTeams();
+async function createSeasonRecord(name) {
+  const teams = await loadTeams();
   if (teams.length < 2) {
     throw new Error("At least two teams are required to create a season.");
   }
 
   const season = createSeasonShape(name, teams);
-  const insertSeason = db.prepare("INSERT INTO seasons (id, name, created_at, status) VALUES (?, ?, ?, ?)");
-  const insertSeasonTeam = db.prepare("INSERT INTO season_teams (season_id, team_id, position) VALUES (?, ?, ?)");
-  const insertRound = db.prepare("INSERT INTO rounds (season_id, number, simulated_at) VALUES (?, ?, ?)");
-  const insertMatch = db.prepare(`
-    INSERT INTO matches (
-      id, season_id, round_number, home_team_id, away_team_id, home_score, away_score,
-      home_shots_on_target, away_shots_on_target, home_possession_seconds, away_possession_seconds,
-      played_at, winner_team_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-
-  db.exec("BEGIN");
+  const client = await pool.connect();
   try {
-    insertSeason.run(season.id, season.name, season.createdAt, season.status);
-    season.teamIds.forEach((teamId, index) => insertSeasonTeam.run(season.id, teamId, index));
-    season.rounds.forEach((round) => insertRound.run(season.id, round.number, round.simulatedAt));
-    season.matches.forEach((match) => {
-      insertMatch.run(
-        match.id,
-        season.id,
-        match.roundNumber,
-        match.homeTeamId,
-        match.awayTeamId,
-        match.homeScore,
-        match.awayScore,
-        match.homeShotsOnTarget,
-        match.awayShotsOnTarget,
-        match.homePossessionSeconds,
-        match.awayPossessionSeconds,
-        match.playedAt,
-        match.winnerTeamId,
+    await client.query("BEGIN");
+    await client.query(
+      "INSERT INTO seasons (id, name, created_at, status) VALUES ($1, $2, $3, $4)",
+      [season.id, season.name, season.createdAt, season.status],
+    );
+
+    for (const [index, teamId] of season.teamIds.entries()) {
+      await client.query(
+        "INSERT INTO season_teams (season_id, team_id, position) VALUES ($1, $2, $3)",
+        [season.id, teamId, index],
       );
-    });
-    db.exec("COMMIT");
+    }
+
+    for (const round of season.rounds) {
+      await client.query(
+        "INSERT INTO rounds (season_id, number, simulated_at) VALUES ($1, $2, $3)",
+        [season.id, round.number, round.simulatedAt],
+      );
+    }
+
+    for (const match of season.matches) {
+      await client.query(
+        `INSERT INTO matches (
+          id, season_id, round_number, home_team_id, away_team_id, home_score, away_score,
+          home_shots_on_target, away_shots_on_target, home_possession_seconds, away_possession_seconds,
+          played_at, winner_team_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+        [
+          match.id,
+          season.id,
+          match.roundNumber,
+          match.homeTeamId,
+          match.awayTeamId,
+          match.homeScore,
+          match.awayScore,
+          match.homeShotsOnTarget,
+          match.awayShotsOnTarget,
+          match.homePossessionSeconds,
+          match.awayPossessionSeconds,
+          match.playedAt,
+          match.winnerTeamId,
+        ],
+      );
+    }
+
+    await client.query("COMMIT");
   } catch (error) {
-    db.exec("ROLLBACK");
+    await client.query("ROLLBACK");
     throw error;
+  } finally {
+    client.release();
   }
 }
 
-function deleteSeason(seasonId) {
-  const result = db.prepare("DELETE FROM seasons WHERE id = ?").run(seasonId);
-  if (result.changes === 0) {
+async function deleteSeason(seasonId) {
+  const result = await pool.query("DELETE FROM seasons WHERE id = $1", [seasonId]);
+  if (result.rowCount === 0) {
     throw new Error("Season not found.");
   }
 }
 
-function simulateRoundRecord(seasonId) {
-  const season = loadSeasons().find((entry) => entry.id === seasonId);
+async function simulateRoundRecord(seasonId) {
+  const season = (await loadSeasons()).find((entry) => entry.id === seasonId);
   if (!season) {
     throw new Error("Season not found.");
   }
 
-  persistSeasonMutation(simulateRoundShape(season));
+  await persistSeasonMutation(simulateRoundShape(season));
 }
 
-function simulateSeasonRecord(seasonId) {
-  const season = loadSeasons().find((entry) => entry.id === seasonId);
+async function simulateSeasonRecord(seasonId) {
+  const season = (await loadSeasons()).find((entry) => entry.id === seasonId);
   if (!season) {
     throw new Error("Season not found.");
   }
@@ -369,41 +374,48 @@ function simulateSeasonRecord(seasonId) {
   while (getNextRound(updated)) {
     updated = simulateRoundShape(updated);
   }
-
-  persistSeasonMutation({ ...updated, status: "completed" });
+  await persistSeasonMutation({ ...updated, status: "completed" });
 }
 
-function persistSeasonMutation(season) {
-  const updateSeason = db.prepare("UPDATE seasons SET status = ? WHERE id = ?");
-  const updateRound = db.prepare("UPDATE rounds SET simulated_at = ? WHERE season_id = ? AND number = ?");
-  const updateMatch = db.prepare(`
-    UPDATE matches
-    SET home_score = ?, away_score = ?, home_shots_on_target = ?, away_shots_on_target = ?,
-        home_possession_seconds = ?, away_possession_seconds = ?, played_at = ?, winner_team_id = ?
-    WHERE id = ?
-  `);
-
-  db.exec("BEGIN");
+async function persistSeasonMutation(season) {
+  const client = await pool.connect();
   try {
-    updateSeason.run(season.status, season.id);
-    season.rounds.forEach((round) => updateRound.run(round.simulatedAt, season.id, round.number));
-    season.matches.forEach((match) => {
-      updateMatch.run(
-        match.homeScore,
-        match.awayScore,
-        match.homeShotsOnTarget,
-        match.awayShotsOnTarget,
-        match.homePossessionSeconds,
-        match.awayPossessionSeconds,
-        match.playedAt,
-        match.winnerTeamId,
-        match.id,
+    await client.query("BEGIN");
+    await client.query("UPDATE seasons SET status = $1 WHERE id = $2", [season.status, season.id]);
+
+    for (const round of season.rounds) {
+      await client.query(
+        "UPDATE rounds SET simulated_at = $1 WHERE season_id = $2 AND number = $3",
+        [round.simulatedAt, season.id, round.number],
       );
-    });
-    db.exec("COMMIT");
+    }
+
+    for (const match of season.matches) {
+      await client.query(
+        `UPDATE matches
+         SET home_score = $1, away_score = $2, home_shots_on_target = $3, away_shots_on_target = $4,
+             home_possession_seconds = $5, away_possession_seconds = $6, played_at = $7, winner_team_id = $8
+         WHERE id = $9`,
+        [
+          match.homeScore,
+          match.awayScore,
+          match.homeShotsOnTarget,
+          match.awayShotsOnTarget,
+          match.homePossessionSeconds,
+          match.awayPossessionSeconds,
+          match.playedAt,
+          match.winnerTeamId,
+          match.id,
+        ],
+      );
+    }
+
+    await client.query("COMMIT");
   } catch (error) {
-    db.exec("ROLLBACK");
+    await client.query("ROLLBACK");
     throw error;
+  } finally {
+    client.release();
   }
 }
 
@@ -427,7 +439,6 @@ function createSchedule(teamIds) {
   if (sourceIds.length < 2) {
     return { rounds: [], matches: [] };
   }
-
   if (sourceIds.length % 2 === 1) {
     sourceIds.push("bye");
   }
@@ -489,13 +500,7 @@ function simulateRoundShape(season) {
   }
 
   const timestamp = new Date().toISOString();
-  const matches = season.matches.map((match) => {
-    if (!nextRound.matchIds.includes(match.id)) {
-      return match;
-    }
-
-    return simulateMatch(match, timestamp);
-  });
+  const matches = season.matches.map((match) => (nextRound.matchIds.includes(match.id) ? simulateMatch(match, timestamp) : match));
   const rounds = season.rounds.map((round) =>
     round.number === nextRound.number ? { ...round, simulatedAt: timestamp } : round,
   );
@@ -566,8 +571,6 @@ function buildSeasonStats(season, teams) {
 
     const home = statsMap.get(match.homeTeamId);
     const away = statsMap.get(match.awayTeamId);
-    const shots = getShotValues(match);
-    const possession = getPossessionValues(match);
     if (!home || !away) {
       return;
     }
@@ -578,10 +581,10 @@ function buildSeasonStats(season, teams) {
     home.goalsAgainst += match.awayScore;
     away.goalsFor += match.awayScore;
     away.goalsAgainst += match.homeScore;
-    home.shotsOnTarget += shots.homeShotsOnTarget;
-    away.shotsOnTarget += shots.awayShotsOnTarget;
-    home.possessionSeconds += possession.homePossessionSeconds;
-    away.possessionSeconds += possession.awayPossessionSeconds;
+    home.shotsOnTarget += match.homeShotsOnTarget ?? 0;
+    away.shotsOnTarget += match.awayShotsOnTarget ?? 0;
+    home.possessionSeconds += match.homePossessionSeconds ?? 0;
+    away.possessionSeconds += match.awayPossessionSeconds ?? 0;
 
     if (match.homeScore === match.awayScore) {
       home.draws += 1;
@@ -599,9 +602,7 @@ function buildSeasonStats(season, teams) {
     }
   });
 
-  return [...statsMap.values()]
-    .map(finalizeStats)
-    .sort(compareStats);
+  return [...statsMap.values()].map(finalizeStats).sort(compareStats);
 }
 
 function buildAllTimeStats(seasons, teams) {
@@ -674,11 +675,7 @@ function buildRoundExportRows(season, teams, roundNumber) {
 
 function buildTeamExportRows(teamId, state) {
   const team = state.teams.find((entry) => entry.id === teamId);
-  const rows = [
-    ["team", team?.name ?? "Unknown Team"],
-    [],
-    ["season", ...statsHeaderRow().slice(1)],
-  ];
+  const rows = [["team", team?.name ?? "Unknown Team"], [], ["season", ...statsHeaderRow().slice(1)]];
 
   state.seasons
     .filter((season) => season.teamIds.includes(teamId))
@@ -722,18 +719,16 @@ function matchHeaderRow() {
 }
 
 function matchRowToCsv(match, teamLookup) {
-  const shots = getShotValues(match);
-  const possession = getPossessionValues(match);
   return [
     match.roundNumber,
     teamLookup.get(match.homeTeamId) ?? "Unknown Team",
     teamLookup.get(match.awayTeamId) ?? "Unknown Team",
     match.homeScore ?? "",
     match.awayScore ?? "",
-    match.homeScore === null ? "" : shots.homeShotsOnTarget,
-    match.awayScore === null ? "" : shots.awayShotsOnTarget,
-    match.homeScore === null ? "" : (possession.homePossessionSeconds / 60).toFixed(1),
-    match.awayScore === null ? "" : (possession.awayPossessionSeconds / 60).toFixed(1),
+    match.homeShotsOnTarget ?? "",
+    match.awayShotsOnTarget ?? "",
+    match.homePossessionSeconds === null ? "" : (match.homePossessionSeconds / 60).toFixed(1),
+    match.awayPossessionSeconds === null ? "" : (match.awayPossessionSeconds / 60).toFixed(1),
     match.homeScore === null || match.awayScore === null
       ? ""
       : match.winnerTeamId
@@ -741,21 +736,6 @@ function matchRowToCsv(match, teamLookup) {
         : "Draw",
     match.playedAt ?? "",
   ];
-}
-
-function getShotValues(match) {
-  return {
-    homeShotsOnTarget: match.homeShotsOnTarget ?? (match.homeScore === null ? 0 : Math.max(match.homeScore, match.homeScore + 2)),
-    awayShotsOnTarget: match.awayShotsOnTarget ?? (match.awayScore === null ? 0 : Math.max(match.awayScore, match.awayScore + 2)),
-  };
-}
-
-function getPossessionValues(match) {
-  const totalMatchSeconds = 90 * 60;
-  return {
-    homePossessionSeconds: match.homePossessionSeconds ?? totalMatchSeconds / 2,
-    awayPossessionSeconds: match.awayPossessionSeconds ?? totalMatchSeconds / 2,
-  };
 }
 
 function sendCsv(response, filename, rows) {
@@ -780,9 +760,7 @@ function serveStaticAsset(response, pathname, headOnly) {
     return;
   }
 
-  const contentType = getContentType(assetPath);
-  response.writeHead(200, { "Content-Type": contentType });
-
+  response.writeHead(200, { "Content-Type": getContentType(assetPath) });
   if (headOnly) {
     response.end();
     return;
@@ -853,11 +831,16 @@ function sendJson(response, status, payload) {
 }
 
 function sendText(response, status, body, contentType, disposition) {
-  response.writeHead(status, {
+  const headers = {
     "Content-Type": contentType,
-    "Content-Disposition": disposition,
     "Access-Control-Allow-Origin": "*",
-  });
+  };
+
+  if (disposition) {
+    headers["Content-Disposition"] = disposition;
+  }
+
+  response.writeHead(status, headers);
   response.end(body);
 }
 
